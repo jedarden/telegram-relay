@@ -23,7 +23,7 @@ caller (any pod on the tailnet)
   |
   | POST /send {chat_id?, text, parse_mode?}
   v
-telegram-relay (Deployment, iad-ci, namespace "telegram-relay")
+telegram-relay (Deployment, ardenone-cluster, namespace "telegram-relay")
   |
   | injects TELEGRAM_BOT_TOKEN (OpenBao -> ExternalSecret -> env var)
   v
@@ -32,13 +32,17 @@ api.telegram.org/bot<token>/sendMessage
 
 - Single replica, stateless. A crash loses nothing — no in-flight state to
   recover.
-- Deployed on `iad-ci`: it's where the first real caller
-  (`hetzner-auction-dashboard`'s pipeline) already runs, and `iad-ci` already
-  has a live `openbao` `ClusterSecretStore` reading `rs-manager`'s OpenBao.
-- Exposed on the tailnet through `iad-ci`'s existing Traefik `vpn` entrypoint
-  (not a new `tailscale.com/expose` — see declarative-config's standing "one
-  Tailscale-exposed Service per cluster" rule), so any cluster or box on the
-  tailnet can reach it, not just pods inside `iad-ci`.
+- Deployed on `ardenone-cluster`, not `iad-ci`: `iad-ci`'s own CLAUDE.md says
+  to keep long-lived services off the CI/build cluster, and
+  `hetzner-auction-dashboard`'s pipeline (the first real caller) turned out to
+  already live on `ardenone-cluster` rather than `iad-ci`. `ardenone-cluster`
+  has its own local, independently-writable OpenBao instance.
+- CI still builds on `iad-ci` — that's the org-wide CI policy regardless of
+  where a service is deployed.
+- Exposed on the tailnet through `ardenone-cluster`'s existing Traefik `vpn`
+  entrypoint (not a new `tailscale.com/expose` — see declarative-config's
+  standing "one Tailscale-exposed Service per cluster" rule), so any cluster
+  or box on the tailnet can reach it, not just pods on `ardenone-cluster`.
 - No public (`websecure`) exposure. This service can send messages to a
   Telegram chat; there is no reason for it to be internet-reachable.
 
@@ -69,14 +73,21 @@ No persistent state. Request/response shape is documented in `README.md`.
   `ronaldraygun/telegram-relay:<semver>`. No auto-trigger sensor for v1;
   manual `kubectl create -f` submission is the accepted fallback, same as
   `hetzner-auction-dashboard`'s Phase 6 criteria.
-- Manifests: `k8s/iad-ci/telegram-relay/` (namespace, deployment, service,
-  ExternalSecret + template) and `k8s/iad-ci/traefik/telegram-relay-ingressroute.yml`
-  (Certificate + vpn-entrypoint IngressRoute, following the `victorialogs`
-  pattern of living in the `traefik` namespace so it deploys with the
-  always-reconciled `traefik-ns-iad-ci` app).
-- Secret: `secret/rs-manager/iad-ci/telegram-relay` in OpenBao (fields
-  `telegram-bot-token`, `telegram-chat-id`, optional `relay-auth-token`) —
-  owned by rs-manager's OpenBao per "write to the OpenBao that owns the path".
+- Manifests: `k8s/ardenone-cluster/telegram-relay/` (namespace, deployment,
+  service, ExternalSecret + template, vpn-entrypoint IngressRoute — following
+  the `lab-health` pattern of a Certificate + IngressRoute living alongside
+  the app's own namespace rather than centralized in `traefik/`).
+- Secrets, both on ardenone-cluster's own OpenBao instance:
+  - `secret/ardenone-cluster/telegram/ardenone_bot` (field `token`) — reused
+    from the retired `telegram-bridge` project rather than provisioning a new
+    bot; its k8s wiring was decommissioned 2026-08-24 but the OpenBao value
+    was left in place.
+  - `secret/ardenone-cluster/telegram-relay/config` (field
+    `default_chat_id`) — telegram-relay-specific, since the old bridge never
+    needed a default.
+  - `RELAY_AUTH_TOKEN` is not wired into an ExternalSecret at all for v1 — it's
+    a purely optional env var an operator can set later if the network-isolation
+    boundary alone turns out not to be enough.
 
 ## Open questions
 
