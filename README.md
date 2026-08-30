@@ -6,11 +6,23 @@ this service's own pod (injected from OpenBao); callers never need their own
 copy of it. Any workload that wants to send a Telegram alert can `POST` here
 instead of holding a bot token itself.
 
+> **Security:** if `RELAY_AUTH_TOKEN` is unset, every client that can reach the
+> service can send through the bot. Bind it only to a trusted private network
+> or configure the bearer token; do not expose an unauthenticated relay to the
+> public internet.
+
 ## API
 
 `GET /healthz` — liveness/readiness check, always `200 ok`.
 
 `POST /send`
+
+```bash
+curl -fsS http://127.0.0.1:8080/send \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
+  --data '{"text":"deployment finished"}'
+```
 
 ```json
 {
@@ -47,6 +59,10 @@ token is a defense-in-depth option, not a requirement.
 - `docs/notes/` — features, constraints, design decisions
 - `docs/research/` — external reference material and prior art
 - `docs/plan/plan.md` — complete application plan
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ---
 
