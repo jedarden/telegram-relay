@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,6 +53,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/send", r.handleSend)
+	mux.HandleFunc("/alertmanager", r.handleAlertmanager)
 
 	srv := &http.Server{
 		Addr:              ":" + port,
@@ -165,3 +168,130 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
+
+// telegramMaxText is Telegram's sendMessage limit, in characters.
+const telegramMaxText = 4096
+
+type amAlert struct {
+	Status      string            `json:"status"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+type amPayload struct {
+	Status      string            `json:"status"`
+	Alerts      []amAlert         `json:"alerts"`
+	CommonLabel map[string]string `json:"commonLabels"`
+}
+
+// handleAlertmanager accepts an Alertmanager webhook (payload version 4) and
+// forwards a plain-text summary to the default chat, so an Alertmanager
+// webhook_configs receiver can point straight at the relay. An optional
+// ?chat_id= query parameter overrides the default chat.
+func (r *relay) handleAlertmanager(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !r.authorized(req) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	req.Body = http.MaxBytesReader(w, req.Body, 1024*1024)
+	var body amPayload
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid Alertmanager payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body.Alerts) == 0 {
+		http.Error(w, "payload has no alerts", http.StatusBadRequest)
+		return
+	}
+	chatID := req.URL.Query().Get("chat_id")
+	if chatID == "" {
+		chatID = r.defaultChat
+	}
+	if chatID == "" {
+		http.Error(w, "chat_id is required (no TELEGRAM_DEFAULT_CHAT_ID configured)", http.StatusBadRequest)
+		return
+	}
+
+	status, respBody, err := r.sendMessage(req.Context(), chatID, formatAlertmanager(body), "")
+	if err != nil {
+		http.Error(w, "telegram request failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(respBody)
+}
+
+func formatAlertmanager(p amPayload) string {
+	var b strings.Builder
+	firing, resolved := 0, 0
+	for _, a := range p.Alerts {
+		if a.Status == "resolved" {
+			resolved++
+		} else {
+			firing++
+		}
+	}
+	switch {
+	case firing > 0 && resolved > 0:
+		b.WriteString("ALERT " + itoa(firing) + " firing, " + itoa(resolved) + " resolved")
+	case firing > 0:
+		b.WriteString("FIRING (" + itoa(firing) + ")")
+	default:
+		b.WriteString("RESOLVED (" + itoa(resolved) + ")")
+	}
+	if c := p.CommonLabel["cluster"]; c != "" {
+		b.WriteString(" [" + c + "]")
+	}
+	for _, a := range p.Alerts {
+		b.WriteString("\n\n")
+		if a.Status == "resolved" {
+			b.WriteString("[resolved] ")
+		}
+		name := a.Labels["alertname"]
+		if name == "" {
+			name = "(unnamed alert)"
+		}
+		if sev := a.Labels["severity"]; sev != "" {
+			b.WriteString(sev + ": ")
+		}
+		b.WriteString(name)
+		if msg := firstNonEmpty(a.Annotations["summary"], a.Annotations["description"], a.Annotations["message"]); msg != "" {
+			b.WriteString("\n" + msg)
+		}
+		var keys []string
+		for k := range a.Labels {
+			if k != "alertname" && k != "severity" && k != "cluster" {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 {
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, k+"="+a.Labels[k])
+			}
+			b.WriteString("\n" + strings.Join(parts, " "))
+		}
+	}
+	out := b.String()
+	if r := []rune(out); len(r) > telegramMaxText {
+		out = string(r[:telegramMaxText-1]) + "…"
+	}
+	return out
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

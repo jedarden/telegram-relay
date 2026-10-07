@@ -45,6 +45,24 @@ If `RELAY_AUTH_TOKEN` is configured, `POST /send` requires
 only over Tailscale, never the public internet) is the primary boundary; the
 token is a defense-in-depth option, not a requirement.
 
+`POST /alertmanager`
+
+An Alertmanager webhook receiver can point straight at the relay:
+
+```yaml
+receivers:
+  - name: telegram
+    webhook_configs:
+      - url: https://<relay-host>/alertmanager
+        send_resolved: true
+```
+
+The Alertmanager payload (version 4) is rendered as a plain-text summary
+(status, cluster label, severity, alertname, summary, remaining labels),
+truncated to Telegram's 4096-character limit, and sent to
+`TELEGRAM_DEFAULT_CHAT_ID`. `?chat_id=` overrides the chat. The same optional
+bearer-token check as `/send` applies.
+
 ## Configuration
 
 | Env var | Required | Purpose |
